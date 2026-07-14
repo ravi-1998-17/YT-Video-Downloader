@@ -1,0 +1,5 @@
+node_modules/
+server/bin/*.exe
+server/bin/*.zip
+dist/
+dist-electron/
