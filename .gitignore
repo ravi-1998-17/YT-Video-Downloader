@@ -1,5 +1,4 @@
 node_modules/
-server/bin/*.exe
-server/bin/*.zip
+server/bin/
 dist/
-dist-electron/
+dist-electron/

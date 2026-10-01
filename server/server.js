@@ -25,7 +25,7 @@ let isDownloading = false;
 let isPaused = false; // Track explicit manual pause state
 let currentProcess = null;
 
-// Download Binaries if missing
+// Download Binaries if missing & auto-update yt-dlp
 async function ensureBinaries() {
   if (!fs.existsSync(ytDlpPath)) {
     console.log('Downloading yt-dlp.exe...');
@@ -33,6 +33,12 @@ async function ensureBinaries() {
     const writer = fs.createWriteStream(ytDlpPath);
     res.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
+  } else {
+    // Attempt auto-update in background
+    try {
+      const upProc = spawn(ytDlpPath, ['-U']);
+      upProc.on('error', () => {});
+    } catch (e) {}
   }
   if (!fs.existsSync(ffmpegPath)) {
     console.log('Downloading ffmpeg...');
@@ -56,27 +62,36 @@ io.on('connection', (socket) => {
       await ensureBinaries();
       socket.emit('log', `Fetching metadata for: ${url}`);
       
-      const args = ['--flat-playlist', '-J', url];
+      const args = ['--flat-playlist', '-J', '--js-runtimes', 'node', url];
       const proc = spawn(ytDlpPath, args);
       let output = '';
+      let errorOutput = '';
 
       proc.stdout.on('data', d => output += d.toString());
+      proc.stderr.on('data', d => errorOutput += d.toString());
+
       proc.on('close', (code) => {
-        if (code !== 0) return socket.emit('error', 'Failed to fetch URL. May be invalid or private.');
+        if (code !== 0) {
+          console.error('yt-dlp error:', errorOutput);
+          return socket.emit('error', `Failed to fetch URL. ${errorOutput.split('\n')[0] || 'May be invalid or private.'}`);
+        }
         try {
           const data = JSON.parse(output);
-          const entries = data.entries || [data];
-          const videos = entries.map(v => ({
-            id: v.id,
-            title: v.title || `[Unavailable Video]`, // Prevent blank names
-            url: v.url || `https://www.youtube.com/watch?v=${v.id}`,
-            status: 'pending',
-            progress: 0,
-            speed: '',
-            eta: ''
-          }));
+          const rawEntries = (data.entries && data.entries.length > 0) ? data.entries : [data];
+          const videos = rawEntries
+            .filter(v => v != null)
+            .map((v, index) => ({
+              id: v.id || `vid_${index}_${Date.now()}`,
+              title: v.title || `Video ${index + 1}`,
+              url: v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url),
+              status: 'pending',
+              progress: 0,
+              speed: '',
+              eta: ''
+            }));
           socket.emit('playlist_fetched', videos);
         } catch (e) {
+          console.error('JSON parse error:', e);
           socket.emit('error', 'Failed to parse metadata.');
         }
       });
@@ -88,8 +103,12 @@ io.on('connection', (socket) => {
   socket.on('start_downloads', (data) => {
     const { videos, outDir } = data;
     videos.forEach(v => {
-      if (!downloadQueue.find(q => q.id === v.id)) {
-        downloadQueue.push({ ...v, outDir });
+      const existing = downloadQueue.find(q => q.id === v.id);
+      if (!existing) {
+        downloadQueue.push({ ...v, status: 'pending', outDir });
+      } else if (existing.status === 'failed' || existing.status === 'pending') {
+        existing.status = 'pending';
+        existing.outDir = outDir;
       }
     });
     // If not actively downloading, start it
@@ -135,12 +154,17 @@ async function processQueue() {
   
   const args = [
     '--newline', 
+    '--js-runtimes', 'node',
     '--ffmpeg-location', ffmpegPath,
-    '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+    '-f', 'bestvideo+bestaudio/best',
     '--merge-output-format', 'mp4',
+    '--windows-filenames',
+    '--no-playlist',
     '--no-overwrites',
-    '--retries', 'infinite',          // Feature: Auto-retry infinitely on network drop
-    '--fragment-retries', 'infinite', // Feature: Wait for internet to reconnect gracefully
+    '--retries', '10',
+    '--fragment-retries', '10',
+    '--retry-sleep', 'linear=1:5:2',
+    '--concurrent-fragments', '4',
     '-o', path.join(video.outDir, '%(title)s.%(ext)s'),
     video.url
   ];
@@ -165,6 +189,11 @@ async function processQueue() {
     }
   });
 
+  currentProcess.stderr.on('data', (data) => {
+    const line = data.toString().trim();
+    if (line) io.emit('log', `[info] ${line}`);
+  });
+
   currentProcess.on('close', (code) => {
     currentProcess = null;
     
@@ -179,10 +208,10 @@ async function processQueue() {
       downloadQueue.shift();
     } else {
       io.emit('video_update', { id: video.id, status: 'failed' });
-      downloadQueue.shift(); // Move past failed
+      downloadQueue.shift(); // Move past failed video to avoid blocking queue
     }
     processQueue();
   });
 }
 
-server.listen(4000, () => console.log('Backend running on port 4000'));
+server.listen(4000, () => console.log('Backend running on port 4000'));
