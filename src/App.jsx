@@ -5,11 +5,19 @@ const socket = io('http://localhost:4000');
 
 export default function App() {
   const [url, setUrl] = useState('');
-  const [outDir, setOutDir] = useState('');
+  const [outDir, setOutDir] = useState(() => {
+    return localStorage.getItem('yt_downloader_outDir') || '';
+  });
   const [videos, setVideos] = useState([]);
   const [logs, setLogs] = useState([]);
   const [isFetching, setIsFetching] = useState(false);
   const [globalStatus, setGlobalStatus] = useState('idle'); // idle, downloading, paused
+
+  useEffect(() => {
+    if (outDir) {
+      localStorage.setItem('yt_downloader_outDir', outDir);
+    }
+  }, [outDir]);
 
   useEffect(() => {
     socket.on('playlist_fetched', (data) => {
@@ -35,8 +43,11 @@ export default function App() {
 
   const handleSelectFolder = async () => {
     if (window.electronAPI) {
-      const folder = await window.electronAPI.selectFolder();
-      if (folder) setOutDir(folder);
+      const folder = await window.electronAPI.selectFolder(outDir);
+      if (folder) {
+        setOutDir(folder);
+        localStorage.setItem('yt_downloader_outDir', folder);
+      }
     } else {
       alert("Folder selection only works in the Electron App.");
     }

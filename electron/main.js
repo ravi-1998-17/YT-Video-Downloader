@@ -34,9 +34,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-ipcMain.handle('dialog:selectFolder', async () => {
+ipcMain.handle('dialog:selectFolder', async (event, defaultPath) => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory']
+    properties: ['openDirectory'],
+    defaultPath: defaultPath || undefined
   });
   return result.canceled ? null : result.filePaths[0];
 });
