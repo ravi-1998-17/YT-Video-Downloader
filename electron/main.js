@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, MenuItem } = require('electron');
 const path = require('path');
 const { execSync } = require('child_process');
 
@@ -27,6 +27,27 @@ function createWindow() {
       contextIsolation: true,
     },
     autoHideMenuBar: true
+  });
+
+  // Enable Right-Click Context Menu (Cut, Copy, Paste, Select All)
+  mainWindow.webContents.on('context-menu', (e, params) => {
+    const menu = new Menu();
+
+    if (params.isEditable) {
+      menu.append(new MenuItem({ label: 'Cut', role: 'cut' }));
+      menu.append(new MenuItem({ label: 'Copy', role: 'copy' }));
+      menu.append(new MenuItem({ label: 'Paste', role: 'paste' }));
+      menu.append(new MenuItem({ type: 'separator' }));
+      menu.append(new MenuItem({ label: 'Select All', role: 'selectAll' }));
+    } else if (params.selectionText && params.selectionText.trim().length > 0) {
+      menu.append(new MenuItem({ label: 'Copy', role: 'copy' }));
+      menu.append(new MenuItem({ label: 'Select All', role: 'selectAll' }));
+    } else {
+      menu.append(new MenuItem({ label: 'Paste', role: 'paste' }));
+      menu.append(new MenuItem({ label: 'Select All', role: 'selectAll' }));
+    }
+
+    menu.popup({ window: mainWindow });
   });
 
   const isDev = !app.isPackaged;

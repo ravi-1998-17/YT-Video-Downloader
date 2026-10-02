@@ -104,7 +104,7 @@ export default function App() {
     if (!outDir) return alert('Please select an output folder first.');
     setVideos(prev => prev.map(v => v.id === video.id ? { ...v, selected: true, status: 'pending', progress: 0, error: null, retryCount: 0 } : v));
     setGlobalStatus('downloading');
-    socket.emit('start_downloads', { videos: [video], outDir, format, quality, cookiesBrowser });
+    socket.emit('start_downloads', { videos: [video], outDir, format, quality, cookiesBrowser, forceReDownload: true });
   };
 
   const handleClearQueue = () => {
@@ -124,6 +124,17 @@ export default function App() {
   const handleToggleSelectAll = () => {
     const targetState = !allSelected;
     setVideos(prev => prev.map(v => ({ ...v, selected: targetState })));
+  };
+
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setUrl(text.trim());
+      }
+    } catch (err) {
+      console.error('Failed to read clipboard:', err);
+    }
   };
 
   return (
@@ -158,6 +169,15 @@ export default function App() {
                 placeholder="Paste YouTube video or playlist URL here..." 
                 className="flex-1 bg-transparent text-sm font-medium text-gray-900 placeholder-gray-400 focus:outline-none"
               />
+              {!url && !isFetching && (
+                <button 
+                  onClick={handlePasteFromClipboard}
+                  className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200/70 rounded-xl text-xs font-bold transition-all flex items-center gap-1 shrink-0"
+                  title="Paste URL from clipboard"
+                >
+                  <span>📋 Paste</span>
+                </button>
+              )}
               {isFetching && (
                 <div className="flex items-center gap-2 text-xs font-semibold text-blue-600">
                   <span className="w-4 h-4 border-2 border-blue-600/30 border-t-blue-600 rounded-full animate-spin"></span>
@@ -331,6 +351,11 @@ export default function App() {
                     className="w-4 h-4 rounded text-blue-600 border-gray-300 accent-blue-600 cursor-pointer"
                   />
 
+                  {/* Clip Sequence Number Badge */}
+                  <div className="w-8 h-8 rounded-xl bg-gray-100 border border-gray-200/90 flex items-center justify-center text-xs font-black text-gray-700 shrink-0 shadow-2xs" title={`Clip #${v.playlistIndex || (i + 1)}`}>
+                    #{v.playlistIndex || (i + 1)}
+                  </div>
+
                   {/* Video Thumbnail with Duration Overlay */}
                   <div className="relative w-32 h-20 rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shrink-0 shadow-xs">
                     {v.thumbnail ? (
@@ -353,6 +378,7 @@ export default function App() {
                   {/* Video Info Column */}
                   <div className="flex-1 min-w-0 space-y-1.5">
                     <h3 className="font-bold text-sm text-gray-900 truncate" title={v.title}>
+                      <span className="text-blue-600 font-extrabold mr-1.5">#{v.playlistIndex || (i + 1)}.</span>
                       {v.title}
                     </h3>
 
@@ -364,12 +390,16 @@ export default function App() {
                     </div>
 
                     {/* Progress Bar & Realtime Download Metrics */}
-                    {(v.status === 'downloading' || v.status === 'retrying' || v.status === 'completed' || v.progress > 0) && (
+                    {(v.status === 'downloading' || v.status === 'retrying' || v.status === 'completed' || v.status === 'skipped' || v.progress > 0) && (
                       <div className="space-y-1 pt-1">
                         <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden border border-gray-200/80">
                           <div 
                             className={`h-full rounded-full transition-all duration-300 ${
-                              v.status === 'retrying' ? 'bg-amber-500' : 'bg-blue-600'
+                              v.status === 'retrying' 
+                                ? 'bg-amber-500' 
+                                : v.status === 'skipped'
+                                  ? 'bg-amber-400'
+                                  : 'bg-blue-600'
                             }`}
                             style={{ width: `${v.progress || 0}%` }}
                           ></div>
@@ -390,10 +420,15 @@ export default function App() {
 
                   {/* Status Badge & Actions */}
                   <div className="shrink-0 flex items-center gap-3">
-                    {v.status === 'completed' || v.status === 'skipped' ? (
+                    {v.status === 'completed' ? (
                       <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                         Completed
+                      </span>
+                    ) : v.status === 'skipped' ? (
+                      <span className="bg-amber-50 text-amber-800 border border-amber-200 px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5" title="File already exists in save directory">
+                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>
+                        Skipped (Already Exists)
                       </span>
                     ) : v.status === 'downloading' ? (
                       <span className="bg-blue-50 text-blue-700 border border-blue-200 px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 animate-pulse">

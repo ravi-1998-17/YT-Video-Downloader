@@ -82,6 +82,54 @@ async function ensureBinaries() {
   }
 }
 
+function sanitizeFilename(title) {
+  if (!title) return '';
+  return title.replace(/[/\\?%*:|"<>]/g, '_').trim();
+}
+
+function isAlreadyDownloaded(outDir, title, format, playlistIndex) {
+  if (!outDir || !fs.existsSync(outDir)) return false;
+
+  const ext = format === 'mp3' ? 'mp3' : (format === 'mkv' ? 'mkv' : 'mp4');
+  const cleanTitle = sanitizeFilename(title).toLowerCase();
+  if (!cleanTitle) return false;
+
+  // Check 1: Direct exact file paths
+  const exactPath = path.join(outDir, `${title}.${ext}`);
+  const sanitizedPath = path.join(outDir, `${sanitizeFilename(title)}.${ext}`);
+  if (fs.existsSync(exactPath) || fs.existsSync(sanitizedPath)) return true;
+
+  // Check 2: Scan output directory files
+  try {
+    const files = fs.readdirSync(outDir);
+    const normalizedTarget = cleanTitle.replace(/[^a-z0-9]/g, '');
+
+    for (const file of files) {
+      if (file.endsWith('.part') || file.endsWith('.ytdl') || file.endsWith('.temp')) continue;
+      
+      const fileExt = path.extname(file).replace('.', '').toLowerCase();
+      const isAudioOnly = format === 'mp3';
+      const isTargetAudio = ['mp3', 'm4a', 'aac', 'wav', 'flac'].includes(fileExt);
+      const isTargetVideo = ['mp4', 'mkv', 'webm', 'avi', 'mov'].includes(fileExt);
+
+      if (isAudioOnly ? !isTargetAudio : !isTargetVideo) continue;
+
+      const fileNameWithoutExt = path.parse(file).name.toLowerCase();
+      const normalizedFile = fileNameWithoutExt.replace(/[^a-z0-9]/g, '');
+
+      if (normalizedTarget.length > 0) {
+        if (normalizedFile === normalizedTarget || (normalizedTarget.length >= 6 && normalizedFile.includes(normalizedTarget))) {
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error checking existing files in directory:', err);
+  }
+
+  return false;
+}
+
 io.on('connection', (socket) => {
   socket.on('fetch_playlist', async (rawUrl) => {
     try {
@@ -169,6 +217,7 @@ io.on('connection', (socket) => {
 
           return {
             id: videoId,
+            playlistIndex: index + 1,
             title: videoTitle,
             url: videoUrl,
             duration: durationSec,
@@ -197,13 +246,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_downloads', (data) => {
-    const { videos, outDir, format, quality, cookiesBrowser } = data;
+    const { videos, outDir, format, quality, cookiesBrowser, forceReDownload } = data;
     videos.forEach(v => {
+      const alreadyExists = !forceReDownload && isAlreadyDownloaded(outDir, v.title, format || 'mp4', v.playlistIndex);
+
       const existing = downloadQueue.find(q => q.id === v.id);
       const item = { 
         ...v, 
-        status: 'pending', 
-        progress: 0,
+        status: alreadyExists ? 'skipped' : 'pending', 
+        progress: alreadyExists ? 100 : 0,
         error: null,
         retryCount: 0,
         outDir, 
@@ -211,11 +262,26 @@ io.on('connection', (socket) => {
         quality: quality || '1080p (if available)',
         cookiesBrowser: cookiesBrowser || 'none'
       };
+
+      if (alreadyExists) {
+        io.emit('video_update', { 
+          id: v.id, 
+          status: 'skipped', 
+          progress: 100, 
+          speed: '', 
+          eta: '', 
+          error: null 
+        });
+      }
+
       if (!existing) {
-        downloadQueue.push(item);
+        if (!alreadyExists) downloadQueue.push(item);
       } else {
         Object.assign(existing, item);
-        if (!downloadQueue.includes(existing)) {
+        if (alreadyExists) {
+          const qIdx = downloadQueue.indexOf(existing);
+          if (qIdx !== -1) downloadQueue.splice(qIdx, 1);
+        } else if (!downloadQueue.includes(existing)) {
           downloadQueue.push(existing);
         }
       }
@@ -255,6 +321,22 @@ async function processQueue() {
   const video = downloadQueue[0];
   
   if (video.status === 'completed' || video.status === 'skipped') {
+    downloadQueue.shift();
+    return processQueue();
+  }
+
+  // Pre-flight check: If destination file already exists, skip downloading
+  if (isAlreadyDownloaded(video.outDir, video.title, video.format, video.playlistIndex)) {
+    console.log(`[Skip] "${video.title}" already exists in ${video.outDir}`);
+    video.status = 'skipped';
+    io.emit('video_update', { 
+      id: video.id, 
+      status: 'skipped', 
+      progress: 100, 
+      speed: '', 
+      eta: '', 
+      error: null 
+    });
     downloadQueue.shift();
     return processQueue();
   }
@@ -358,6 +440,7 @@ async function processQueue() {
         io.emit('video_update', updateObj);
       }
       if (line.includes('has already been downloaded')) {
+        video.status = 'skipped';
         io.emit('video_update', { id: video.id, status: 'skipped', progress: 100, speed: '', eta: '', error: null });
       }
     });
@@ -383,9 +466,11 @@ async function processQueue() {
     }
 
     if (code === 0) {
+      const finalStatus = video.status === 'skipped' ? 'skipped' : 'completed';
+      video.status = finalStatus;
       io.emit('video_update', { 
         id: video.id, 
-        status: 'completed', 
+        status: finalStatus, 
         progress: 100, 
         speed: '', 
         eta: '',
