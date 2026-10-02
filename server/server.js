@@ -234,6 +234,8 @@ async function processQueue() {
     '--windows-filenames',
     '--no-playlist',
     '--no-overwrites',
+    '--no-write-thumbnail',
+    '--no-embed-thumbnail',
     '--retries', '20',
     '--fragment-retries', '20',
     '--retry-sleep', 'linear=1:5:2',
@@ -322,6 +324,8 @@ function retryFallback(video) {
     '-f', 'best',
     '--no-playlist',
     '--no-overwrites',
+    '--no-write-thumbnail',
+    '--no-embed-thumbnail',
     '--retries', '10',
     '-o', path.join(video.outDir, '%(title)s.%(ext)s'),
     video.url
