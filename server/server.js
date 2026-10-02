@@ -82,78 +82,89 @@ async function ensureBinaries() {
 }
 
 io.on('connection', (socket) => {
-  socket.on('fetch_playlist', async (url) => {
+  socket.on('fetch_playlist', async (rawUrl) => {
     try {
       await ensureBinaries();
-      socket.emit('log', `Fetching metadata for: ${url}`);
+      const cleanUrl = rawUrl.trim().replace(/[\?&]si=[^&]+/, '');
+      socket.emit('log', `Fetching metadata for: ${cleanUrl}`);
       
-      const args = ['--flat-playlist', '-J', '--js-runtimes', 'node', url];
-      const proc = spawn(ytDlpPath, args);
-      let output = '';
-      let errorOutput = '';
+      const runYtDlp = (args) => {
+        return new Promise((resolve) => {
+          const proc = spawn(ytDlpPath, args);
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', d => stdout += d.toString());
+          proc.stderr.on('data', d => stderr += d.toString());
+          proc.on('close', (code) => resolve({ code, stdout, stderr }));
+        });
+      };
 
-      proc.stdout.on('data', d => output += d.toString());
-      proc.stderr.on('data', d => errorOutput += d.toString());
+      // Attempt 1: --flat-playlist -J
+      let res = await runYtDlp(['--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
+      let parsed = null;
+      try {
+        if (res.stdout) parsed = JSON.parse(res.stdout);
+      } catch (e) {}
 
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          console.error('yt-dlp error:', errorOutput);
-          return socket.emit('error', `Failed to fetch URL. ${errorOutput.split('\n')[0] || 'May be invalid or private.'}`);
-        }
+      // Attempt 2: If attempt 1 failed or returned no entries/id, run standard -J
+      if (!parsed || (!parsed.entries && !parsed.id && !parsed.title)) {
+        res = await runYtDlp(['-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
         try {
-          const data = JSON.parse(output);
-          
-          let rawEntries = [];
-          if (data.entries && Array.isArray(data.entries) && data.entries.length > 0) {
-            rawEntries = data.entries;
-          } else if (data.id || data.title) {
-            rawEntries = [data];
+          if (res.stdout) parsed = JSON.parse(res.stdout);
+        } catch (e) {}
+      }
+
+      if (!parsed) {
+        return socket.emit('error', 'Failed to fetch video details. Check link or network connection.');
+      }
+
+      let rawEntries = [];
+      if (parsed.entries && Array.isArray(parsed.entries) && parsed.entries.length > 0) {
+        rawEntries = parsed.entries;
+      } else if (parsed.id || parsed.title) {
+        rawEntries = [parsed];
+      }
+
+      const videos = rawEntries
+        .filter(v => v != null)
+        .map((v, index) => {
+          const videoId = v.id || `vid_${index}_${Date.now()}`;
+          const videoTitle = v.title || `Video ${index + 1}`;
+          const videoUrl = v.webpage_url || v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : cleanUrl);
+          const durationSec = v.duration || 0;
+          const approxBytes = v.filesize || v.filesize_approx || (durationSec ? durationSec * 150000 : 0);
+
+          let thumbUrl = v.thumbnail;
+          if (!thumbUrl && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
+            thumbUrl = v.thumbnails[v.thumbnails.length - 1].url;
+          }
+          if (!thumbUrl && v.id) {
+            thumbUrl = `https://img.youtube.com/vi/${v.id}/mqdefault.jpg`;
           }
 
-          const videos = rawEntries
-            .filter(v => v != null)
-            .map((v, index) => {
-              const videoId = v.id || `vid_${index}_${Date.now()}`;
-              const videoTitle = v.title || `Video ${index + 1}`;
-              const videoUrl = v.webpage_url || v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url);
-              const durationSec = v.duration || 0;
-              const approxBytes = v.filesize || v.filesize_approx || (durationSec ? durationSec * 150000 : 0);
+          return {
+            id: videoId,
+            title: videoTitle,
+            url: videoUrl,
+            duration: durationSec,
+            filesizeBytes: approxBytes,
+            filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '350.0 MB',
+            thumbnail: thumbUrl || '',
+            status: 'pending',
+            progress: 0,
+            totalSize: approxBytes ? formatBytes(approxBytes) : '',
+            speed: '',
+            eta: ''
+          };
+        });
 
-              let thumbUrl = v.thumbnail;
-              if (!thumbUrl && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
-                thumbUrl = v.thumbnails[v.thumbnails.length - 1].url;
-              }
-              if (!thumbUrl && v.id) {
-                thumbUrl = `https://img.youtube.com/vi/${v.id}/mqdefault.jpg`;
-              }
+      if (videos.length === 0) {
+        return socket.emit('error', 'No downloadable videos found at this URL.');
+      }
 
-              return {
-                id: videoId,
-                title: videoTitle,
-                url: videoUrl,
-                duration: durationSec,
-                filesizeBytes: approxBytes,
-                filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '350.0 MB',
-                thumbnail: thumbUrl || '',
-                status: 'pending',
-                progress: 0,
-                totalSize: approxBytes ? formatBytes(approxBytes) : '',
-                speed: '',
-                eta: ''
-              };
-            });
-
-          if (videos.length === 0) {
-            return socket.emit('error', 'No downloadable videos found at this URL.');
-          }
-
-          socket.emit('playlist_fetched', videos);
-        } catch (e) {
-          console.error('JSON parse error:', e);
-          socket.emit('error', 'Failed to parse metadata.');
-        }
-      });
+      socket.emit('playlist_fetched', videos);
     } catch (err) {
+      console.error('Fetch error:', err);
       socket.emit('error', 'Failed to initialize downloader.');
     }
   });
