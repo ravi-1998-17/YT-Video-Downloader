@@ -28,7 +28,7 @@ export default function App() {
     }
   }, [outDir]);
 
-  // Auto-detect link as soon as pasted or entered (No manual detect button needed)
+  // Auto-detect link as soon as pasted or entered
   useEffect(() => {
     const trimmed = url.trim();
     if (!trimmed) {
@@ -94,6 +94,13 @@ export default function App() {
     socket.emit('start_downloads', { videos: [video], outDir, format, quality });
   };
 
+  const handleClearQueue = () => {
+    socket.emit('action', { type: 'clear' });
+    setVideos([]);
+    setUrl('');
+    setGlobalStatus('idle');
+  };
+
   const toggleVideoSelection = (id) => {
     setVideos(prev => prev.map(v => v.id === id ? { ...v, selected: !v.selected } : v));
   };
@@ -119,7 +126,7 @@ export default function App() {
           </div>
         </header>
 
-        {/* Input & Settings Card (Matching Screenshot 2 - Auto-detect without manual button) */}
+        {/* Input & Settings Card */}
         <div className="bg-white border border-gray-200/90 rounded-3xl p-5 shadow-sm space-y-4">
           {/* URL Search Bar */}
           <div className="relative">
@@ -208,7 +215,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Videos Found & List Container (Matching Screenshot 2) */}
+        {/* Videos Found & List Container */}
         <div className="bg-white border border-gray-200/90 rounded-3xl p-6 shadow-sm space-y-4">
           {/* Header Row */}
           <div className="flex items-center justify-between pb-2 border-b border-gray-100">
@@ -220,13 +227,23 @@ export default function App() {
             </div>
 
             {videos.length > 0 && (
-              <button 
-                onClick={handleStartAllSelected}
-                disabled={selectedCount === 0 || globalStatus === 'downloading'}
-                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md shadow-blue-500/20 flex items-center gap-2"
-              >
-                <span>📥 Download Selected ({selectedCount})</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={handleClearQueue}
+                  className="px-4 py-2.5 bg-gray-100 hover:bg-rose-50 text-gray-700 hover:text-rose-600 border border-gray-200 hover:border-rose-200 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5"
+                  title="Stop all downloads & clear queue"
+                >
+                  <span>🗑️ Clear Queue</span>
+                </button>
+
+                <button 
+                  onClick={handleStartAllSelected}
+                  disabled={selectedCount === 0 || globalStatus === 'downloading'}
+                  className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-md shadow-blue-500/20 flex items-center gap-2"
+                >
+                  <span>📥 Download Selected ({selectedCount})</span>
+                </button>
+              </div>
             )}
           </div>
 
@@ -303,7 +320,7 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Status Badge (Matching Screenshot 2) */}
+                {/* Status Badge */}
                 <div className="shrink-0 flex items-center gap-3">
                   {v.status === 'completed' || v.status === 'skipped' ? (
                     <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5">

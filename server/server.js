@@ -99,14 +99,12 @@ io.on('connection', (socket) => {
         });
       };
 
-      // Attempt 1: --flat-playlist -J
       let res = await runYtDlp(['--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
       let parsed = null;
       try {
         if (res.stdout) parsed = JSON.parse(res.stdout);
       } catch (e) {}
 
-      // Attempt 2: If attempt 1 failed or returned no entries/id, run standard -J
       if (!parsed || (!parsed.entries && !parsed.id && !parsed.title)) {
         res = await runYtDlp(['-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
         try {
@@ -184,12 +182,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('action', (data) => {
-    if (data.type === 'cancel') {
+    if (data.type === 'cancel' || data.type === 'clear') {
       isPaused = false;
       downloadQueue = [];
       isDownloading = false;
       stopCurrentProcess();
-      io.emit('log', 'All downloads cancelled.');
+      io.emit('log', 'All downloads cancelled and queue cleared.');
     } else if (data.type === 'pause') {
       isPaused = true;
       stopCurrentProcess();
@@ -221,11 +219,9 @@ async function processQueue() {
 
   io.emit('video_update', { id: video.id, status: 'downloading' });
 
-  // Temp directory to isolate intermediate download fragments (.f137, .f140, .part)
   const tempDir = path.join(video.outDir, '.temp');
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-  // Format & Quality Selection
   let formatArg = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best';
   if (video.format === 'mp3') {
     formatArg = 'bestaudio/best';
