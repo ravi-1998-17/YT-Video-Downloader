@@ -5,6 +5,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 
@@ -99,14 +100,14 @@ io.on('connection', (socket) => {
         });
       };
 
-      let res = await runYtDlp(['-4', '--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=tv,android_vr', cleanUrl]);
+      let res = await runYtDlp(['-4', '--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
       let parsed = null;
       try {
         if (res.stdout) parsed = JSON.parse(res.stdout);
       } catch (e) {}
 
       if (!parsed || (!parsed.entries && !parsed.id && !parsed.title)) {
-        res = await runYtDlp(['-4', '-J', '--no-warnings', '--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=tv,android_vr', cleanUrl]);
+        res = await runYtDlp(['-4', '-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
         try {
           if (res.stdout) parsed = JSON.parse(res.stdout);
         } catch (e) {}
@@ -172,13 +173,15 @@ io.on('connection', (socket) => {
             url: videoUrl,
             duration: durationSec,
             filesizeBytes: approxBytes,
-            filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '350.0 MB',
+            filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '',
             thumbnail: thumbUrl || '',
             status: 'pending',
             progress: 0,
             totalSize: approxBytes ? formatBytes(approxBytes) : '',
             speed: '',
-            eta: ''
+            eta: '',
+            error: null,
+            retryCount: 0
           };
         });
 
@@ -194,14 +197,27 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_downloads', (data) => {
-    const { videos, outDir, format, quality } = data;
+    const { videos, outDir, format, quality, cookiesBrowser } = data;
     videos.forEach(v => {
       const existing = downloadQueue.find(q => q.id === v.id);
-      const item = { ...v, status: 'pending', outDir, format: format || 'mp4', quality: quality || '1080p' };
+      const item = { 
+        ...v, 
+        status: 'pending', 
+        progress: 0,
+        error: null,
+        retryCount: 0,
+        outDir, 
+        format: format || 'mp4', 
+        quality: quality || '1080p (if available)',
+        cookiesBrowser: cookiesBrowser || 'none'
+      };
       if (!existing) {
         downloadQueue.push(item);
-      } else if (existing.status === 'failed' || existing.status === 'pending') {
+      } else {
         Object.assign(existing, item);
+        if (!downloadQueue.includes(existing)) {
+          downloadQueue.push(existing);
+        }
       }
     });
     if (!isDownloading && !isPaused) processQueue();
@@ -243,51 +259,78 @@ async function processQueue() {
     return processQueue();
   }
 
-  io.emit('video_update', { id: video.id, status: 'downloading' });
+  const currentAttempt = (video.retryCount || 0) + 1;
 
-  const tempDir = path.join(video.outDir, '.temp');
-  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+  io.emit('video_update', { 
+    id: video.id, 
+    status: currentAttempt > 1 ? 'retrying' : 'downloading', 
+    error: currentAttempt > 1 ? `Auto-retrying (Attempt ${currentAttempt})...` : null 
+  });
 
-  let formatArg = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best';
+  const systemTempDir = path.join(os.tmpdir(), 'yt-downloader-temp');
+  if (!fs.existsSync(systemTempDir)) fs.mkdirSync(systemTempDir, { recursive: true });
+
+  // Clean up any legacy .temp folder in outDir if present
+  const legacyTemp = path.join(video.outDir, '.temp');
+  if (fs.existsSync(legacyTemp)) {
+    try { fs.rmSync(legacyTemp, { recursive: true, force: true }); } catch (e) {}
+  }
+
+  // Progressive format degradation strategy on repeated retries
+  let formatArg = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best';
+
   if (video.format === 'mp3') {
     formatArg = 'bestaudio/best';
+  } else if (currentAttempt >= 4) {
+    // Attempt 4+: Universal single best format (highest compatibility)
+    formatArg = 'best';
+  } else if (currentAttempt >= 2) {
+    // Attempt 2+: Generic best video + audio without height restrictions
+    formatArg = 'bestvideo+bestaudio/best';
   } else if (video.quality && video.quality !== 'best' && video.quality !== '1080p (if available)') {
     const height = video.quality.replace('p', '');
-    if (!isNaN(height)) {
-      formatArg = `bestvideo[height<=${height}]+bestaudio/bestvideo[height<=${height}]+bestaudio/best`;
+    if (!isNaN(parseInt(height))) {
+      formatArg = `bestvideo[height<=${height}]+bestaudio/best[height<=${height}]/best`;
     }
+  } else if (video.quality === 'best') {
+    formatArg = 'bestvideo+bestaudio/best';
   }
 
   const args = [
     '-4',
     '--newline', 
     '--js-runtimes', 'node',
-    '--extractor-args', 'youtube:player_client=tv,android_vr',
     '--ffmpeg-location', ffmpegPath,
-    '-P', `temp:${tempDir}`,
+    '-P', `temp:${systemTempDir}`,
     '-f', formatArg,
     '--windows-filenames',
     '--no-playlist',
     '--no-overwrites',
     '--no-write-thumbnail',
     '--no-embed-thumbnail',
-    '--retries', '20',
-    '--fragment-retries', '20',
-    '--retry-sleep', 'linear=1:5:2',
+    '--retries', 'infinite',
+    '--fragment-retries', 'infinite',
+    '--file-access-retries', '20',
+    '--retry-sleep', 'linear=1:5:1',
     '--concurrent-fragments', '4',
     '--no-check-certificates',
     '--geo-bypass'
   ];
 
+  if (video.cookiesBrowser && video.cookiesBrowser !== 'none') {
+    args.unshift('--cookies-from-browser', video.cookiesBrowser);
+  }
+
   if (video.format === 'mp3') {
     args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
   } else {
-    args.push('--merge-output-format', 'mp4');
+    args.push('--merge-output-format', video.format === 'mkv' ? 'mkv' : 'mp4');
   }
 
   args.push('-o', path.join(video.outDir, '%(title)s.%(ext)s'), video.url);
 
   currentProcess = spawn(ytDlpPath, args);
+  let lastError = '';
 
   currentProcess.stdout.on('data', (data) => {
     const text = data.toString();
@@ -304,7 +347,9 @@ async function processQueue() {
       if (percentMatch) {
         const updateObj = {
           id: video.id,
-          progress: parseFloat(percentMatch[1])
+          progress: parseFloat(percentMatch[1]),
+          status: 'downloading',
+          error: null
         };
         if (sizeMatch) updateObj.totalSize = sizeMatch[1].trim();
         if (speedMatch) updateObj.speed = speedMatch[1].trim();
@@ -313,17 +358,23 @@ async function processQueue() {
         io.emit('video_update', updateObj);
       }
       if (line.includes('has already been downloaded')) {
-        io.emit('video_update', { id: video.id, status: 'skipped', progress: 100, speed: '', eta: '' });
+        io.emit('video_update', { id: video.id, status: 'skipped', progress: 100, speed: '', eta: '', error: null });
       }
     });
   });
 
   currentProcess.stderr.on('data', (data) => {
     const line = data.toString().trim();
-    if (line) io.emit('log', `[info] ${line}`);
+    if (line) {
+      if (line.includes('ERROR:')) {
+        const cleaned = line.replace(/^ERROR:\s*(\[[^\]]+\]\s*)?/, '').trim();
+        if (cleaned) lastError = cleaned;
+      }
+      io.emit('log', `[info] ${line}`);
+    }
   });
 
-  currentProcess.on('close', (code) => {
+  currentProcess.on('close', async (code) => {
     currentProcess = null;
     
     if (isPaused) {
@@ -337,46 +388,28 @@ async function processQueue() {
         status: 'completed', 
         progress: 100, 
         speed: '', 
-        eta: '' 
+        eta: '',
+        error: null 
       });
       downloadQueue.shift();
+      processQueue();
     } else {
-      console.log(`Initial download failed for ${video.title}, retrying with fallback format...`);
-      retryFallback(video);
-      return;
-    }
-    processQueue();
-  });
-}
+      video.retryCount = (video.retryCount || 0) + 1;
+      const errorText = lastError || 'Network connection dropped.';
+      const waitMs = Math.min(video.retryCount * 2000, 6000);
 
-function retryFallback(video) {
-  const tempDir = path.join(video.outDir, '.temp');
-  const fallbackArgs = [
-    '-4',
-    '--newline',
-    '--js-runtimes', 'node',
-    '--extractor-args', 'youtube:player_client=tv,android_vr',
-    '--ffmpeg-location', ffmpegPath,
-    '-P', `temp:${tempDir}`,
-    '-f', 'best',
-    '--no-playlist',
-    '--no-overwrites',
-    '--no-write-thumbnail',
-    '--no-embed-thumbnail',
-    '--retries', '10',
-    '-o', path.join(video.outDir, '%(title)s.%(ext)s'),
-    video.url
-  ];
+      console.log(`Download failed for "${video.title}" (${errorText}). Auto-retrying attempt ${video.retryCount + 1} in ${waitMs / 1000}s...`);
 
-  const fallbackProc = spawn(ytDlpPath, fallbackArgs);
-  fallbackProc.on('close', (code) => {
-    if (code === 0) {
-      io.emit('video_update', { id: video.id, status: 'completed', progress: 100, speed: '', eta: '' });
-    } else {
-      io.emit('video_update', { id: video.id, status: 'failed', speed: '', eta: '' });
+      io.emit('video_update', { 
+        id: video.id, 
+        status: 'retrying', 
+        error: `Auto-retrying (Attempt ${video.retryCount + 1}): ${errorText}`
+      });
+
+      // Wait brief backoff and retry the exact same video WITHOUT removing it from queue!
+      await new Promise(r => setTimeout(r, waitMs));
+      processQueue();
     }
-    downloadQueue.shift();
-    processQueue();
   });
 }
 
