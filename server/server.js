@@ -99,17 +99,43 @@ io.on('connection', (socket) => {
         });
       };
 
-      let res = await runYtDlp(['--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
+      let res = await runYtDlp(['-4', '--flat-playlist', '-J', '--no-warnings', '--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=tv,android_vr', cleanUrl]);
       let parsed = null;
       try {
         if (res.stdout) parsed = JSON.parse(res.stdout);
       } catch (e) {}
 
       if (!parsed || (!parsed.entries && !parsed.id && !parsed.title)) {
-        res = await runYtDlp(['-J', '--no-warnings', '--js-runtimes', 'node', cleanUrl]);
+        res = await runYtDlp(['-4', '-J', '--no-warnings', '--js-runtimes', 'node', '--extractor-args', 'youtube:player_client=tv,android_vr', cleanUrl]);
         try {
           if (res.stdout) parsed = JSON.parse(res.stdout);
         } catch (e) {}
+      }
+
+      if (!parsed || (!parsed.entries && !parsed.id && !parsed.title)) {
+        // Fallback for single YouTube video links using YouTube oEmbed API
+        const ytIdMatch = cleanUrl.match(/(?:youtu\.be\/|watch\?v=|\/embed\/|\/v\/)([^#\&\?]+)/);
+        if (ytIdMatch && ytIdMatch[1]) {
+          const videoId = ytIdMatch[1];
+          try {
+            const oembedRes = await axios.get(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+            if (oembedRes.data && oembedRes.data.title) {
+              parsed = {
+                id: videoId,
+                title: oembedRes.data.title,
+                webpage_url: `https://www.youtube.com/watch?v=${videoId}`,
+                thumbnail: oembedRes.data.thumbnail_url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+              };
+            }
+          } catch (oembedErr) {
+            parsed = {
+              id: videoId,
+              title: `YouTube Video (${videoId})`,
+              webpage_url: `https://www.youtube.com/watch?v=${videoId}`,
+              thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+            };
+          }
+        }
       }
 
       if (!parsed) {
@@ -233,10 +259,12 @@ async function processQueue() {
   }
 
   const args = [
+    '-4',
     '--newline', 
     '--js-runtimes', 'node',
+    '--extractor-args', 'youtube:player_client=tv,android_vr',
     '--ffmpeg-location', ffmpegPath,
-    '--temp-directory', tempDir,
+    '-P', `temp:${tempDir}`,
     '-f', formatArg,
     '--windows-filenames',
     '--no-playlist',
@@ -324,10 +352,12 @@ async function processQueue() {
 function retryFallback(video) {
   const tempDir = path.join(video.outDir, '.temp');
   const fallbackArgs = [
+    '-4',
     '--newline',
     '--js-runtimes', 'node',
+    '--extractor-args', 'youtube:player_client=tv,android_vr',
     '--ffmpeg-location', ffmpegPath,
-    '--temp-directory', tempDir,
+    '-P', `temp:${tempDir}`,
     '-f', 'best',
     '--no-playlist',
     '--no-overwrites',
