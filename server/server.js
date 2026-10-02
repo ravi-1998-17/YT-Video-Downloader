@@ -22,8 +22,34 @@ if (!fs.existsSync(binPath)) fs.mkdirSync(binPath, { recursive: true });
 
 let downloadQueue = [];
 let isDownloading = false;
-let isPaused = false; // Track explicit manual pause state
+let isPaused = false;
 let currentProcess = null;
+
+function formatBytes(bytes) {
+  if (!bytes || isNaN(bytes)) return '';
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1000) {
+    return `${(mb / 1024).toFixed(1)} GB`;
+  }
+  return `${mb.toFixed(1)} MB`;
+}
+
+function stopCurrentProcess() {
+  if (!currentProcess) return;
+  try {
+    const pid = currentProcess.pid;
+    if (pid) {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/F', '/T', '/PID', pid.toString()]);
+      } else {
+        currentProcess.kill('SIGKILL');
+      }
+    }
+  } catch (err) {
+    console.error('Error stopping process tree:', err);
+  }
+  currentProcess = null;
+}
 
 // Download Binaries if missing & auto-update yt-dlp
 async function ensureBinaries() {
@@ -34,7 +60,6 @@ async function ensureBinaries() {
     res.data.pipe(writer);
     await new Promise(r => writer.on('finish', r));
   } else {
-    // Attempt auto-update in background
     try {
       const upProc = spawn(ytDlpPath, ['-U']);
       upProc.on('error', () => {});
@@ -80,15 +105,26 @@ io.on('connection', (socket) => {
           const rawEntries = (data.entries && data.entries.length > 0) ? data.entries : [data];
           const videos = rawEntries
             .filter(v => v != null)
-            .map((v, index) => ({
-              id: v.id || `vid_${index}_${Date.now()}`,
-              title: v.title || `Video ${index + 1}`,
-              url: v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url),
-              status: 'pending',
-              progress: 0,
-              speed: '',
-              eta: ''
-            }));
+            .map((v, index) => {
+              const videoId = v.id || `vid_${index}_${Date.now()}`;
+              const durationSec = v.duration || 0;
+              const approxBytes = v.filesize || v.filesize_approx || (durationSec ? durationSec * 150000 : 0);
+
+              return {
+                id: videoId,
+                title: v.title || `Video ${index + 1}`,
+                url: v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url),
+                duration: durationSec,
+                filesizeBytes: approxBytes,
+                filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '350.0 MB',
+                thumbnail: v.thumbnail || (v.id ? `https://img.youtube.com/vi/${v.id}/mqdefault.jpg` : ''),
+                status: 'pending',
+                progress: 0,
+                totalSize: approxBytes ? formatBytes(approxBytes) : '',
+                speed: '',
+                eta: ''
+              };
+            });
           socket.emit('playlist_fetched', videos);
         } catch (e) {
           console.error('JSON parse error:', e);
@@ -101,17 +137,16 @@ io.on('connection', (socket) => {
   });
 
   socket.on('start_downloads', (data) => {
-    const { videos, outDir } = data;
+    const { videos, outDir, format, quality } = data;
     videos.forEach(v => {
       const existing = downloadQueue.find(q => q.id === v.id);
+      const item = { ...v, status: 'pending', outDir, format: format || 'mp4', quality: quality || '1080p' };
       if (!existing) {
-        downloadQueue.push({ ...v, status: 'pending', outDir });
+        downloadQueue.push(item);
       } else if (existing.status === 'failed' || existing.status === 'pending') {
-        existing.status = 'pending';
-        existing.outDir = outDir;
+        Object.assign(existing, item);
       }
     });
-    // If not actively downloading, start it
     if (!isDownloading && !isPaused) processQueue();
   });
 
@@ -120,10 +155,11 @@ io.on('connection', (socket) => {
       isPaused = false;
       downloadQueue = [];
       isDownloading = false;
-      if (currentProcess) currentProcess.kill('SIGINT');
+      stopCurrentProcess();
+      io.emit('log', 'All downloads cancelled.');
     } else if (data.type === 'pause') {
       isPaused = true;
-      if (currentProcess) currentProcess.kill('SIGINT');
+      stopCurrentProcess();
     } else if (data.type === 'resume') {
       isPaused = false;
       processQueue();
@@ -151,42 +187,76 @@ async function processQueue() {
   }
 
   io.emit('video_update', { id: video.id, status: 'downloading' });
-  
+
+  // Temp directory to isolate intermediate download fragments (.f137, .f140, .part)
+  const tempDir = path.join(video.outDir, '.temp');
+  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+  // Format & Quality Selection
+  let formatArg = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best';
+  if (video.format === 'mp3') {
+    formatArg = 'bestaudio/best';
+  } else if (video.quality && video.quality !== 'best' && video.quality !== '1080p (if available)') {
+    const height = video.quality.replace('p', '');
+    if (!isNaN(height)) {
+      formatArg = `bestvideo[height<=${height}]+bestaudio/bestvideo[height<=${height}]+bestaudio/best`;
+    }
+  }
+
   const args = [
     '--newline', 
     '--js-runtimes', 'node',
     '--ffmpeg-location', ffmpegPath,
-    '-f', 'bestvideo+bestaudio/best',
-    '--merge-output-format', 'mp4',
+    '--temp-directory', tempDir,
+    '-f', formatArg,
     '--windows-filenames',
     '--no-playlist',
     '--no-overwrites',
-    '--retries', '10',
-    '--fragment-retries', '10',
+    '--retries', '20',
+    '--fragment-retries', '20',
     '--retry-sleep', 'linear=1:5:2',
     '--concurrent-fragments', '4',
-    '-o', path.join(video.outDir, '%(title)s.%(ext)s'),
-    video.url
+    '--no-check-certificates',
+    '--geo-bypass'
   ];
+
+  if (video.format === 'mp3') {
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
+  } else {
+    args.push('--merge-output-format', 'mp4');
+  }
+
+  args.push('-o', path.join(video.outDir, '%(title)s.%(ext)s'), video.url);
 
   currentProcess = spawn(ytDlpPath, args);
 
   currentProcess.stdout.on('data', (data) => {
-    const line = data.toString();
-    io.emit('log', line.trim());
-    
-    const progressMatch = line.match(/\[download\]\s+([\d.]+)%.*at\s+(.*\/s)\s+ETA\s+([\d:]+)/);
-    if (progressMatch) {
-      io.emit('video_update', {
-        id: video.id,
-        progress: parseFloat(progressMatch[1]),
-        speed: progressMatch[2],
-        eta: progressMatch[3]
-      });
-    }
-    if (line.includes('has already been downloaded')) {
-      io.emit('video_update', { id: video.id, status: 'skipped', progress: 100 });
-    }
+    const text = data.toString();
+    const lines = text.split(/\r?\n/);
+
+    lines.forEach(line => {
+      if (!line.includes('[download]')) return;
+
+      const percentMatch = line.match(/\[download\]\s+([\d.]+)%/i);
+      const sizeMatch = line.match(/of\s+~?\s*([\d.]+\s*[a-zA-Z]+)/i);
+      const speedMatch = line.match(/at\s+([\d.]+\s*\w+\/s)/i);
+      const etaMatch = line.match(/(?:ETA|in)\s+([\d:]+)/i);
+
+      if (percentMatch) {
+        const updateObj = {
+          id: video.id,
+          progress: parseFloat(percentMatch[1])
+        };
+        if (sizeMatch) updateObj.totalSize = sizeMatch[1].trim();
+        if (speedMatch) updateObj.speed = speedMatch[1].trim();
+        if (etaMatch) updateObj.eta = etaMatch[1].trim();
+
+        io.emit('video_update', updateObj);
+      }
+      if (line.includes('has already been downloaded')) {
+        io.emit('video_update', { id: video.id, status: 'skipped', progress: 100, speed: '', eta: '' });
+      }
+    });
   });
 
   currentProcess.stderr.on('data', (data) => {
@@ -197,21 +267,60 @@ async function processQueue() {
   currentProcess.on('close', (code) => {
     currentProcess = null;
     
-    // Feature: If user hit pause, stop processing but DO NOT remove video from queue
     if (isPaused) {
       io.emit('video_update', { id: video.id, status: 'paused' });
       return; 
     }
 
     if (code === 0) {
-      io.emit('video_update', { id: video.id, status: 'completed', progress: 100 });
+      io.emit('video_update', { 
+        id: video.id, 
+        status: 'completed', 
+        progress: 100, 
+        speed: '', 
+        eta: '' 
+      });
       downloadQueue.shift();
     } else {
-      io.emit('video_update', { id: video.id, status: 'failed' });
-      downloadQueue.shift(); // Move past failed video to avoid blocking queue
+      // Fallback: Attempt single-stream best format download before declaring failure
+      console.log(`Initial download failed for ${video.title}, retrying with fallback format...`);
+      retryFallback(video);
+      return;
     }
     processQueue();
   });
 }
 
-server.listen(4000, () => console.log('Backend running on port 4000'));
+function retryFallback(video) {
+  const tempDir = path.join(video.outDir, '.temp');
+  const fallbackArgs = [
+    '--newline',
+    '--js-runtimes', 'node',
+    '--ffmpeg-location', ffmpegPath,
+    '--temp-directory', tempDir,
+    '-f', 'best',
+    '--no-playlist',
+    '--no-overwrites',
+    '--retries', '10',
+    '-o', path.join(video.outDir, '%(title)s.%(ext)s'),
+    video.url
+  ];
+
+  const fallbackProc = spawn(ytDlpPath, fallbackArgs);
+  fallbackProc.on('close', (code) => {
+    if (code === 0) {
+      io.emit('video_update', { id: video.id, status: 'completed', progress: 100, speed: '', eta: '' });
+    } else {
+      io.emit('video_update', { id: video.id, status: 'failed', speed: '', eta: '' });
+    }
+    downloadQueue.shift();
+    processQueue();
+  });
+}
+
+// Emergency process cleanup on exit
+process.on('SIGINT', () => { stopCurrentProcess(); process.exit(0); });
+process.on('SIGTERM', () => { stopCurrentProcess(); process.exit(0); });
+process.on('exit', () => { stopCurrentProcess(); });
+
+server.listen(4000, () => console.log('Backend running on port 4000'));

@@ -1,12 +1,26 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
+const { execSync } = require('child_process');
 
 let mainWindow;
 
+function killBgProcesses() {
+  if (process.platform === 'win32') {
+    try {
+      execSync('taskkill /F /IM yt-dlp.exe /T', { stdio: 'ignore' });
+    } catch (e) {}
+    try {
+      execSync('taskkill /F /IM ffmpeg.exe /T', { stdio: 'ignore' });
+    } catch (e) {}
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1040,
+    height: 740,
+    minWidth: 800,
+    minHeight: 600,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -21,6 +35,11 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    killBgProcesses();
+  });
 }
 
 app.whenReady().then(() => {
@@ -30,7 +49,12 @@ app.whenReady().then(() => {
   });
 });
 
+app.on('before-quit', () => {
+  killBgProcesses();
+});
+
 app.on('window-all-closed', () => {
+  killBgProcesses();
   if (process.platform !== 'darwin') app.quit();
 });
 
