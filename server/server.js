@@ -102,22 +102,39 @@ io.on('connection', (socket) => {
         }
         try {
           const data = JSON.parse(output);
-          const rawEntries = (data.entries && data.entries.length > 0) ? data.entries : [data];
+          
+          let rawEntries = [];
+          if (data.entries && Array.isArray(data.entries) && data.entries.length > 0) {
+            rawEntries = data.entries;
+          } else if (data.id || data.title) {
+            rawEntries = [data];
+          }
+
           const videos = rawEntries
             .filter(v => v != null)
             .map((v, index) => {
               const videoId = v.id || `vid_${index}_${Date.now()}`;
+              const videoTitle = v.title || `Video ${index + 1}`;
+              const videoUrl = v.webpage_url || v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url);
               const durationSec = v.duration || 0;
               const approxBytes = v.filesize || v.filesize_approx || (durationSec ? durationSec * 150000 : 0);
 
+              let thumbUrl = v.thumbnail;
+              if (!thumbUrl && Array.isArray(v.thumbnails) && v.thumbnails.length > 0) {
+                thumbUrl = v.thumbnails[v.thumbnails.length - 1].url;
+              }
+              if (!thumbUrl && v.id) {
+                thumbUrl = `https://img.youtube.com/vi/${v.id}/mqdefault.jpg`;
+              }
+
               return {
                 id: videoId,
-                title: v.title || `Video ${index + 1}`,
-                url: v.url || (v.id ? `https://www.youtube.com/watch?v=${v.id}` : url),
+                title: videoTitle,
+                url: videoUrl,
                 duration: durationSec,
                 filesizeBytes: approxBytes,
                 filesizeFormatted: approxBytes ? formatBytes(approxBytes) : '350.0 MB',
-                thumbnail: v.thumbnail || (v.id ? `https://img.youtube.com/vi/${v.id}/mqdefault.jpg` : ''),
+                thumbnail: thumbUrl || '',
                 status: 'pending',
                 progress: 0,
                 totalSize: approxBytes ? formatBytes(approxBytes) : '',
@@ -125,6 +142,11 @@ io.on('connection', (socket) => {
                 eta: ''
               };
             });
+
+          if (videos.length === 0) {
+            return socket.emit('error', 'No downloadable videos found at this URL.');
+          }
+
           socket.emit('playlist_fetched', videos);
         } catch (e) {
           console.error('JSON parse error:', e);
@@ -282,7 +304,6 @@ async function processQueue() {
       });
       downloadQueue.shift();
     } else {
-      // Fallback: Attempt single-stream best format download before declaring failure
       console.log(`Initial download failed for ${video.title}, retrying with fallback format...`);
       retryFallback(video);
       return;

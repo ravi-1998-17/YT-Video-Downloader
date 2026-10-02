@@ -28,6 +28,26 @@ export default function App() {
     }
   }, [outDir]);
 
+  // Auto-detect link as soon as pasted or entered (No manual detect button needed)
+  useEffect(() => {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setVideos([]);
+      setIsFetching(false);
+      return;
+    }
+
+    const isYouTubeUrl = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/i.test(trimmed);
+    if (!isYouTubeUrl) return;
+
+    const timer = setTimeout(() => {
+      setIsFetching(true);
+      socket.emit('fetch_playlist', trimmed);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [url]);
+
   useEffect(() => {
     socket.on('playlist_fetched', (data) => {
       setVideos(data.map(v => ({ ...v, selected: true })));
@@ -58,12 +78,6 @@ export default function App() {
     }
   };
 
-  const handleFetch = () => {
-    if (!url) return;
-    setIsFetching(true);
-    socket.emit('fetch_playlist', url);
-  };
-
   const handleStartAllSelected = () => {
     if (!outDir) return alert('Please select an output folder first.');
     const selectedVideos = videos.filter(v => v.selected);
@@ -84,13 +98,7 @@ export default function App() {
     setVideos(prev => prev.map(v => v.id === id ? { ...v, selected: !v.selected } : v));
   };
 
-  const toggleAllSelection = (e) => {
-    const isChecked = e.target.checked;
-    setVideos(prev => prev.map(v => ({ ...v, selected: isChecked })));
-  };
-
   const selectedCount = videos.filter(v => v.selected).length;
-  const allSelected = videos.length > 0 && selectedCount === videos.length;
 
   return (
     <div className="min-h-screen bg-[#f4f6f8] text-gray-900 font-sans p-6 selection:bg-blue-500 selection:text-white">
@@ -111,11 +119,11 @@ export default function App() {
           </div>
         </header>
 
-        {/* Input & Settings Card (Matching Screenshot 2) */}
+        {/* Input & Settings Card (Matching Screenshot 2 - Auto-detect without manual button) */}
         <div className="bg-white border border-gray-200/90 rounded-3xl p-5 shadow-sm space-y-4">
           {/* URL Search Bar */}
-          <div className="flex gap-3">
-            <div className="flex-1 bg-gray-50/80 border border-gray-200/80 rounded-2xl px-4 py-3 flex items-center gap-3 focus-within:border-blue-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/10 transition-all">
+          <div className="relative">
+            <div className="bg-gray-50/80 border border-gray-200/80 rounded-2xl px-4 py-3 flex items-center gap-3 focus-within:border-blue-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-500/10 transition-all">
               <span className="text-gray-400 text-lg">🔗</span>
               <input 
                 type="text" 
@@ -124,9 +132,15 @@ export default function App() {
                 placeholder="Paste video or playlist URL here..." 
                 className="flex-1 bg-transparent text-sm font-medium text-gray-900 placeholder-gray-400 focus:outline-none"
               />
-              {url && (
+              {isFetching && (
+                <div className="flex items-center gap-2 text-xs font-semibold text-blue-600">
+                  <span className="w-4 h-4 border-2 border-blue-600/30 border-t-blue-600 rounded-full animate-spin"></span>
+                  <span>Auto-detecting...</span>
+                </div>
+              )}
+              {url && !isFetching && (
                 <button 
-                  onClick={() => setUrl('')} 
+                  onClick={() => { setUrl(''); setVideos([]); }} 
                   className="text-gray-400 hover:text-gray-600 text-xs px-1"
                   title="Clear input"
                 >
@@ -134,23 +148,6 @@ export default function App() {
                 </button>
               )}
             </div>
-
-            <button 
-              onClick={handleFetch} 
-              disabled={isFetching || !url.trim()} 
-              className="px-7 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-500/20 shrink-0 flex items-center gap-2"
-            >
-              {isFetching ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-                  <span>Detecting...</span>
-                </>
-              ) : (
-                <>
-                  <span>⚡ Detect Videos</span>
-                </>
-              )}
-            </button>
           </div>
 
           {/* Options Grid (Format, Quality, Save to) */}
@@ -217,7 +214,7 @@ export default function App() {
           <div className="flex items-center justify-between pb-2 border-b border-gray-100">
             <div>
               <h2 className="text-base font-bold text-gray-900">
-                {videos.length} Videos Found
+                {videos.length} {videos.length === 1 ? 'Video' : 'Videos'} Found
               </h2>
               <p className="text-xs text-gray-500 font-medium">Select the videos you want to download</p>
             </div>
@@ -352,8 +349,8 @@ export default function App() {
                 <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-400 text-2xl">
                   📥
                 </div>
-                <p className="text-sm font-semibold text-gray-600">No videos detected yet</p>
-                <p className="text-xs text-gray-400">Paste a YouTube link above and click Detect Videos</p>
+                <p className="text-sm font-semibold text-gray-600">Paste a link above to auto-detect</p>
+                <p className="text-xs text-gray-400">Supports single YouTube video and playlist links</p>
               </div>
             )}
           </div>
